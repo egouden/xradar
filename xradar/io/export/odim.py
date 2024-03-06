@@ -86,34 +86,72 @@ def _write_odim_dataspace(source, destination, compression, compression_opts):
         value = source[keys[idx]]
         h5_data = destination.create_group(data_list[idx])
         enc = value.encoding
+        attrs = value.attrs
         dtype = enc.get("dtype", value.dtype)
 
         # p. 21 ff
         h5_what = h5_data.create_group("what")
-        # get maximum value for dtype for undetect if not available
-        undetect = float(enc.get("_Undetect", np.ma.minimum_fill_value(dtype)))
 
-        # set some defaults, if not available
-        scale_factor = float(enc.get("scale_factor", 1.0))
-        add_offset = float(enc.get("add_offset", 0.0))
-        _fillvalue = float(enc.get("_FillValue", undetect))
+        try:
+            undetect = enc["_Undetect"]
+        except KeyError:
+            try:
+                undetect = attrs["_Undetect"]
+            except KeyError:
+                undetect = 0
+        undetect = float(undetect)
+
+        try:
+            _fillvalue = enc["_FillValue"]
+        except KeyError:
+            try:
+                _fillvalue = attrs["_FillValue"]
+            except:
+                _fillvalue = None
+        if _fillvalue is not None:
+            _fillvalue = float(_fillvalue)
+
+        try:
+            scale_factor = enc["scale_factor"]
+        except KeyError:
+            try:
+                scale_factor = attrs["scale_factor"]
+            except:
+                scale_factor = 1.0
+        scale_factor = float(scale_factor)
+
+        try:
+            add_offset = enc["add_offset"]
+        except KeyError:
+            try:
+                add_offset = attrs["add_offset"]
+            except:
+                add_offset = 0.0
+        add_offset = float(add_offset)
+
+
         what = {
             "quantity": value.name,
             "gain": scale_factor,
             "offset": add_offset,
-            "nodata": _fillvalue,
             "undetect": undetect,
         }
+
+        if _fillvalue is not None:
+            what["nodata"] = _fillvalue
+
         _write_odim(what, h5_what)
 
         # moments handling
+
         val = value.sortby(dim0).values
-        fillval = _fillvalue * scale_factor
-        fillval += add_offset
-        val = (val - add_offset) / scale_factor
-        val[np.isnan(val)] = fillval
-        if np.issubdtype(dtype, np.integer):
-            val = np.rint(val).astype(dtype)
+        if "scale_factor" in enc:
+            fillval = _fillvalue * scale_factor
+            fillval += add_offset
+            val = (val - add_offset) / scale_factor
+            val[np.isnan(val)] = fillval
+            if np.issubdtype(dtype, np.integer):
+                val = np.rint(val).astype(dtype)
         ds = h5_data.create_dataset(
             "data",
             data=val,
