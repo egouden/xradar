@@ -60,7 +60,7 @@ def _write_odim(source, destination):
             destination.attrs[key] = value
 
 
-def _write_odim_dataspace(source, destination, compression, compression_opts):
+def _write_odim_dataspace(source, undetect, destination, compression, compression_opts):
     """Write ODIM_H5 Dataspaces.
 
     Parameters
@@ -82,16 +82,19 @@ def _write_odim_dataspace(source, destination, compression, compression_opts):
 
     data_list = [f"data{i + 1}" for i in range(len(keys))]
     data_idx = np.argsort(data_list)
+    
     for idx in data_idx:
         value = source[keys[idx]]
         h5_data = destination.create_group(data_list[idx])
         enc = value.encoding
         dtype = enc.get("dtype", value.dtype)
 
+        # get maximum value for dtype for undetect if not available
+        if undetect is None:
+            undetect = float(enc.get("_Undetect", np.ma.minimum_fill_value(dtype)))
+
         # p. 21 ff
         h5_what = h5_data.create_group("what")
-        # get maximum value for dtype for undetect if not available
-        undetect = float(enc.get("_Undetect", np.ma.minimum_fill_value(dtype)))
 
         # set some defaults, if not available
         scale_factor = float(enc.get("scale_factor", 1.0))
@@ -139,6 +142,7 @@ def to_odim(
     dtree,
     filename,
     source=None,
+    undetect=None,
     optional_how=False,
     compression="gzip",
     compression_opts=6,
@@ -155,6 +159,8 @@ def to_odim(
     -----------------
     source : str
         mandatory radar identifier (see ODIM documentation)
+    undetect : float
+        Raw value below the measurement detection threshold
     optional_how : boolean
         True to include optional how attributes, defaults to False
     compression : str
@@ -296,6 +302,6 @@ def to_odim(
         _write_odim(ds_how, h5_ds_how)
 
         # write moments
-        _write_odim_dataspace(ds, h5_dataset, compression, compression_opts)
+        _write_odim_dataspace(ds, undetect, h5_dataset, compression, compression_opts)
 
     h5.close()
