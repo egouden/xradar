@@ -93,26 +93,6 @@ def _calculate_angle_res(dim):
     return np.round(np.nanmean(angle_diff_wanted), decimals=2)
 
 
-def _get_azimuth_how(how):
-    startaz = how["startazA"]
-    stopaz = how.get("stopazA", False)
-    if stopaz is False:
-        # stopazA missing
-        # create from startazA
-        stopaz = np.roll(startaz, -1)
-        stopaz[-1] += 360
-    zero_index = np.where(stopaz < startaz)
-    stopaz[zero_index[0]] += 360
-    azimuth_data = (startaz + stopaz) / 2.0
-    azimuth_data[azimuth_data >= 360] -= 360
-    return azimuth_data
-
-
-def _get_azimuth_where(where):
-    res = 360.0 / where["nrays"]
-    return np.arange(res / 2.0, 360.0, res, dtype="float32")
-
-
 def _get_fixed_dim_and_angle(where):
     dim = "elevation"
 
@@ -450,10 +430,22 @@ class _OdimH5NetCDFMetadata(_H5NetCDFMetadata):
 
     @property
     def _azimuth(self):
+        nrays = self.where["nrays"]
+        if nrays not in [180, 360, 720]:
+            raise ValueError('Unexpected number of rays, try reindexing option')
+        ascale = 360/nrays
         try:
-            azimuth = _get_azimuth_how(self.how)
-        except (AttributeError, KeyError, TypeError):
-            azimuth = _get_azimuth_where(self.where)
+            astart = self.how["startazA"][0]
+            astart = min(astart, astart - 360, key=abs)
+            astart = np.round(astart/(ascale/2)) * ascale/2
+        except:
+            try:
+                astart = self.how["astart"]
+            except KeyError:
+                print("Warning: No startazA or astart found, using 0 as default.")
+                astart = 0
+        azimuth = np.arange(astart + ascale/2, 360, ascale)
+
         return Variable((self.dim0,), azimuth, get_azimuth_attrs())
 
     @property
