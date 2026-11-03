@@ -29,6 +29,7 @@
 * TST: Mark open-radar-data tests during collection, detect missing markers at runtime, and split CI into ``filetests`` and ``unittests`` runs with separate coverage reports ({issue}`156`, {pull}`567`) by [@kmuehlbauer](https://github.com/kmuehlbauer)
 * FIX: the IRIS root attribute ``scan_name`` no longer keeps the padding of its fixed-width field (``"SURV_HV_300"``, was ``"SURV_HV_300 "``) ({issue}`575`, {pull}`578`) by [@aladinor](https://github.com/aladinor)
 * FIX: IRIS beam-center azimuth of counter-clockwise rays (sector sweeps alternate direction) that cross north or are wider than 5 degrees was off by 180 degrees; the center is now unwrapped the shorter way round in either rotation direction ({issue}`526`, {pull}`530`) by [@aladinor](https://github.com/aladinor)
+* ENH: add ``xradar.util.rescale`` to resample sweeps onto a coarser azimuth/elevation and range grid ({pull}`582`) by [@egouden](https://github.com/egouden)
 
 ## 0.13.0 (2026-10-21)
 

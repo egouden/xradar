@@ -107,6 +107,121 @@ def test_reindex_range(dtype):
     assert not np.isnan(combined.DBZH).any()
 
 
+def _full_sweep():
+    """Full 360 degree PPI sweep: 600 azimuth samples 0.6 degrees apart,
+    11 gates of 200 m starting at 100 m."""
+    azimuth = np.arange(600) * 0.6 + 0.3
+    rng = 100.0 + np.arange(11) * 200.0
+    dbzh = np.arange(11, dtype="float32") * 10.0  # 0, 10, ..., 100 dBZ
+    ds = xr.Dataset(
+        {
+            "DBZH": (
+                ("azimuth", "range"),
+                np.tile(dbzh, (600, 1)),
+                {"units": "dBZ", "long_name": "Reflectivity"},
+            )
+        },
+        coords={
+            "azimuth": azimuth,
+            "range": ("range", rng, {"units": "meters"}),
+        },
+    )
+    ds["sweep_number"] = xr.DataArray(0)
+    ds["sweep_mode"] = xr.DataArray("azimuth_surveillance")
+    ds["sweep_fixed_angle"] = xr.DataArray(0.6)
+    return ds
+
+
+def _expected_dbzh(range_out, rng, lin, block_gates):
+    """Average *lin* over blocks of *block_gates* gates and interpolate.
+
+    Leftover gates are dropped, the ends are extrapolated along the first
+    and last block and the result is clipped to the block values, as
+    :func:`xradar.util.rescale` does.
+    """
+    used = (lin.size // block_gates) * block_gates
+    blocks = np.array(
+        [lin[i : i + block_gates].mean() for i in range(0, used, block_gates)]
+    )
+    centers = rng[:used].reshape(-1, block_gates).mean(axis=1)
+    values = np.interp(range_out, centers, blocks)  # clamped at both ends
+    # np.interp clamps, while rescale extrapolates along the end blocks
+    slope_lo = (blocks[1] - blocks[0]) / (centers[1] - centers[0])
+    slope_hi = (blocks[-1] - blocks[-2]) / (centers[-1] - centers[-2])
+    values = np.where(
+        range_out < centers[0],
+        blocks[0] + (range_out - centers[0]) * slope_lo,
+        values,
+    )
+    values = np.where(
+        range_out > centers[-1],
+        blocks[-1] + (range_out - centers[-1]) * slope_hi,
+        values,
+    )
+    # rescale clips to the measured block values, a steeper extrapolation
+    # would leave them
+    values = np.clip(values, blocks.min(), blocks.max())
+    return 10 * np.log10(values)
+
+
+def test_rescale_multiple_of_scales():
+    # both scales are exact multiples: 1.2/0.6 = 2 azimuth samples, 1000/200 = 5 gates
+    ds = _full_sweep()
+    before = ds.DBZH.values.copy()
+    out = util.rescale(ds, 1.2, 1000.0)
+
+    # 600 azimuth samples averaged two at a time, 11 gates in blocks of 5
+    # (the last gate is trimmed), then both interpolated onto the target grids
+    assert dict(out.sizes) == {"azimuth": 300, "range": 2}
+    np.testing.assert_array_equal(out.range.values, [500.0, 1500.0])
+    np.testing.assert_allclose(
+        out.azimuth.values, ds.azimuth.values.reshape(-1, 2).mean(axis=1)
+    )
+
+    # DBZH is averaged in linear space: the blocks are centered at 500 m and
+    # 1500 m, which is where the two target gates sit
+    lin = 10 ** (before[0].astype("float64") / 10)
+    expected = _expected_dbzh(out.range.values, ds.range.values, lin, 5)
+    np.testing.assert_allclose(out.DBZH.values, np.tile(expected, (300, 1)), rtol=1e-5)
+    assert np.isfinite(out.DBZH.values).all()
+
+    # attributes, metadata variables and the input sweep are left as they are
+    assert out.DBZH.attrs == ds.DBZH.attrs
+    for var in util.get_sweep_metadata_vars(ds):
+        xr.testing.assert_identical(out[var], ds[var])
+    np.testing.assert_array_equal(ds.DBZH.values, before)
+
+
+def test_rescale_irregular_scales():
+    # neither scale is a multiple, so averaging uses the nearest integer
+    # factor (1/0.6 -> 2 azimuth samples, 500/200 = 2.5 -> 2 gates) while the
+    # output grid is the requested one
+    ds = _full_sweep()
+    out = util.rescale(ds, 1.0, 500.0)
+
+    # 600 azimuth samples averaged two at a time, 11 gates two at a time, then
+    # both interpolated onto the target grids
+    assert dict(out.sizes) == {"azimuth": 360, "range": 4}
+    np.testing.assert_array_equal(out.range.values, [250.0, 750.0, 1250.0, 1750.0])
+    np.testing.assert_array_equal(out.azimuth.values, np.arange(0.5, 360, 1.0))
+
+    # gates are averaged two at a time (block centers at 200, 600, ..., 1800 m)
+    # and interpolated onto the 250, 750, 1250 and 1750 m grid in linear space
+    lin = 10 ** (ds.DBZH.values[0].astype("float64") / 10)
+    expected = _expected_dbzh(out.range.values, ds.range.values, lin, 2)
+    np.testing.assert_allclose(out.DBZH.values, np.tile(expected, (360, 1)), rtol=1e-5)
+    assert np.isfinite(out.DBZH.values).all()
+
+    # a grid that does not line up with the block centers (400, 1200 m)
+    # extrapolates at both ends, which is clipped to the measured values
+    # instead of running outside them or turning NaN in linear space
+    coarse = util.rescale(ds, 1.0, 700.0)
+    np.testing.assert_array_equal(coarse.range.values, [350.0, 1050.0, 1750.0])
+    assert np.isfinite(coarse.DBZH.values).all()
+    assert coarse.DBZH.values.min() >= ds.DBZH.values.min()
+    assert coarse.DBZH.values.max() <= ds.DBZH.values.max()
+
+
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32, np.int64])
 def test_reindex_range_defaults_and_fill(dtype):
     ds = _range_sweep(dtype(250), dtype(500), 6)

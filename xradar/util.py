@@ -32,6 +32,7 @@ __all__ = [
     "get_sweep_dataset_vars",
     "get_sweep_metadata_vars",
     "select_sweep_dataset_vars",
+    "rescale",
     "create_volume",
 ]
 
@@ -897,6 +898,113 @@ def select_sweep_dataset_vars(sweep, select, ancillary=False, optional_metadata=
     sweep_out = sweep[select]
 
     return sweep_out
+
+
+def _rescale_factors(values, scale):
+    """Integer factor to average over and target grid for *values*.
+
+    The grid holds centres half a step apart (``scale/2, 3*scale/2, ...``)
+    that lie within *values*; at most half of *values* is averaged over, so
+    that two blocks remain to interpolate between.
+    """
+    step = abs(values[1] - values[0])  # constant by convention
+    lo, hi = values.min(), values.max()
+    # first half-step centre at or after the first measured value
+    first = np.ceil((lo - scale / 2) / scale) * scale + scale / 2
+    # arange excludes its stop, so nudge it to keep a centre at hi
+    grid = np.arange(min(first, hi), hi + scale * 1e-9, scale)
+    factor = max(round(scale / step), 1)  # nearest integer, at least one
+    factor = min(factor, max(values.size // 2, 1))  # keep two blocks
+    return factor, grid
+
+
+def rescale(sweep, ascale, rscale):
+    """Resample a sweep onto a coarser azimuth/elevation and range grid.
+
+    Range is resampled first, then azimuth/elevation; in both dimensions the
+    data are averaged over an integer number of gates or samples and then
+    interpolated onto the target grid. ``DBZH`` and ``DBTH`` are averaged in
+    linear space, other variables in their own units. The input sweep is left
+    unchanged.
+
+    Parameters
+    ----------
+    sweep : xarray.Dataset
+        Radar sweep dataset following WMO conventions, with at least two
+        gates and two azimuth/elevation samples.
+
+    ascale : float
+        Target azimuth (PPI) or elevation (RHI) resolution in degrees,
+        rounded to the nearest multiple of the current resolution when
+        averaging.
+
+    rscale : float
+        Target gate spacing in meters, rounded to the nearest multiple of the
+        current gate spacing when averaging.
+
+    Returns
+    -------
+    sweep_out : xarray.Dataset
+        Rescaled sweep with the metadata variables of *sweep* unchanged.
+
+    Notes
+    -----
+    The incomplete last block of gates or samples is dropped
+    (``coarsen(..., boundary="trim")``) and the extrapolated ends are
+    clipped to the measured values.
+    """
+    ray_dim = get_ray_dim(sweep)
+    nrange, target_range = _rescale_factors(sweep.range.values, rscale)
+    nray, target_ray = _rescale_factors(sweep[ray_dim].values, ascale)
+
+    # fields stored in dB are averaged in linear space
+    db_fields = ("DBZH", "DBTH")
+
+    sweep_new = []
+    for var in get_sweep_dataset_vars(sweep):
+        sweep_var_ds = sweep[[var]]
+        if var in db_fields:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                sweep_var_ds[var] = 10 ** (sweep_var_ds[var] / 10)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            # range first, then azimuth/elevation; the target grids can
+            # reach past the averaged blocks, as trimmed gates are missing,
+            # so the ends are extrapolated and clipped to the measured values
+            if nrange > 1:
+                sweep_var_ds = sweep_var_ds.coarsen(
+                    {"range": nrange}, boundary="trim"
+                ).mean()
+            # extrapolation can leave the measured values, a steep ramp
+            # towards zero would even turn negative and log10 give NaN
+            limits = float(sweep_var_ds[var].min()), float(sweep_var_ds[var].max())
+            sweep_var_ds = sweep_var_ds.interp(
+                range=target_range, kwargs={"fill_value": "extrapolate"}
+            )
+
+            if nray > 1:
+                sweep_var_ds = sweep_var_ds.coarsen(
+                    {ray_dim: nray}, boundary="trim"
+                ).mean()
+            sweep_var_ds = sweep_var_ds.interp(
+                {ray_dim: target_ray}, kwargs={"fill_value": "extrapolate"}
+            )
+            sweep_var_ds[var] = sweep_var_ds[var].clip(*limits)
+
+        if var in db_fields:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                sweep_var_ds[var] = 10 * np.log10(sweep_var_ds[var])
+        sweep_new.append(sweep_var_ds)
+
+    sweep_new = xr.merge(sweep_new, compat="override")
+
+    for var in get_sweep_metadata_vars(sweep):
+        sweep_new[var] = sweep[var]
+
+    return sweep_new
 
 
 def round_datetime64_to_second(dt):
